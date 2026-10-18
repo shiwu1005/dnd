@@ -3,6 +3,7 @@
 - 交互层（CLI）与核心逻辑解耦：本模块只暴露 GameSession 与命令函数。
 - 每轮：组装 Prompt → LLM 叙事 → 存 turns → 摘要 → 事件 → 队友互动 → 梗。
 """
+import json
 import logging
 import random
 
@@ -23,6 +24,7 @@ class GameSession:
         self.conn = conn or db.connect()
         self.turn_number = self._count_turns()
         self.current_combat = None  # 简化：当前战斗敌人列表（含 HP）
+        self.current_options = self._load_last_options()
 
     def _count_turns(self):
         return self.conn.execute(
@@ -95,8 +97,8 @@ class GameSession:
     def run_turn(self, player_input, talk_companion_id=None):
         """处理一轮玩家输入，返回叙述结果 dict。
 
-        返回: {"narrative": str, "options": [str,...], "event_hint": str|None,
-               "companion_interaction": str|None, "meme_hints":[str] or None}
+        返回: {"narrative": str, "options": [str,...], "event": dict|None,
+               "companion_interaction": str|None}
         """
         self.turn_number += 1
 
@@ -104,33 +106,37 @@ class GameSession:
         from .textutil import safe_text
         player_input = safe_text(player_input)
 
+        player = self._player()
+
         # 玩家主动交谈注入
         talk = None
         if talk_companion_id:
             talk = self.talk_companion(talk_companion_id)
 
-        # 组装 Prompt（不含事件/梗，先判定事件和梗）
+        # 先掷事件，再组装 Prompt：事件必须在叙事之前确定并注入
+        event = None
+        if player and events.roll_turn_end():
+            event = events.fire_event(
+                self.conn, self.save_id, player["current_terrain"], player["level"], self.turn_number
+            )
+
         prompt = saves.build_prompt(
-            self.conn, self.save_id, player_input, talk_companion=talk,
+            self.conn, self.save_id, player_input,
+            extra_event=(event["prompt"] if event else None),
+            talk_companion=talk,
         )
         result = llm.narrate(prompt)
 
-        # 存 turns（玩家 + 叙述者）
+        # 存 turns（玩家 + 叙述者 + 本轮选项，供读档续玩）
         self._store_turn("player", player_input)
         self._store_turn("narrator", result["narrative"])
+        self._store_options(result.get("options") or [])
+        self.current_options = list(result.get("options") or [])
         db.touch_save(self.save_id)
 
         # 摘要
         if memory.maybe_trigger_summary(self.conn, self.save_id):
             memory.create_summary(self.conn, self.save_id)
-
-        # 事件触发（每轮结束 8%-12%）
-        event_hint = None
-        player = self._player()
-        if events.roll_turn_end():
-            event_hint = events.fire_event(
-                self.conn, self.save_id, player["current_terrain"], player["level"], self.turn_number
-            )
 
         # 队友被动互动（5%-8%）
         comp_interaction = None
@@ -139,9 +145,38 @@ class GameSession:
                 self.conn, self.save_id, self.turn_number
             )
 
-        result["event_hint"] = event_hint
+        result["event"] = event
         result["companion_interaction"] = comp_interaction
         return result
+
+    def _store_options(self, options):
+        """把本轮给出的行动选项存为一条 turns 记录（role='options'）。"""
+        if not options:
+            return
+        self._store_turn("options", json.dumps(options, ensure_ascii=False))
+
+    def _load_last_options(self):
+        """读取最近一次记录的行动选项（读档后可直接用编号继续）。"""
+        row = self.conn.execute(
+            "SELECT content FROM turns WHERE save_id=? AND role='options' ORDER BY id DESC LIMIT 1",
+            (self.save_id,),
+        ).fetchone()
+        if row is None:
+            return []
+        try:
+            opts = json.loads(row["content"])
+            return opts if isinstance(opts, list) else []
+        except Exception:  # noqa: BLE001
+            return []
+
+    def recent_recap(self, limit=2):
+        """取最近若干条对话用于读档时回顾（玩家行动 + 叙述者回复）。"""
+        rows = self.conn.execute(
+            "SELECT role, content FROM turns WHERE save_id=? AND role IN ('player','narrator') "
+            "ORDER BY id DESC LIMIT ?",
+            (self.save_id, limit * 2),
+        ).fetchall()
+        return [dict(r) for r in reversed(rows)]
 
     def _store_turn(self, role, content):
         from datetime import datetime
@@ -183,9 +218,15 @@ def new_game_cli(name, world_description=None, wiki=None, keyword=None, choose_c
 
 
 def load_game_cli(save_id):
-    """命令行加载存档。返回 GameSession。"""
+    """命令行加载存档。返回 (GameSession, state)。
+
+    state 中额外带有 recap（最近对话）与 options（上次给出的选项），
+    供界面在进入游戏前回顾上次进度。
+    """
     state = saves.load_save_state(save_id)
     if state is None:
         return None, None
     sess = GameSession(save_id)
+    state["recap"] = sess.recent_recap(limit=2)
+    state["options"] = sess.current_options
     return sess, state

@@ -122,36 +122,45 @@ FALLBACK_NARRATIVE = (
 FALLBACK_OPTIONS = ["继续前进", "观察四周", "稍作休息"]
 
 
+# 连续 JSON 模式失败计数：达到上限后本进程不再浪费一次调用去试 JSON 模式
+_json_mode_failures = 0
+
+
 def narrate(prompt_user_text, options_hint=None):
-    """叙事调用：给定本轮用户输入（Prompt 末尾内容），返回 (narrative, options)。
+    """叙事调用：给定本轮用户输入，返回 {"narrative": str, "options": [str,...]}。
 
     重试逻辑：
-    - JSON 解析失败或 narrative 为空 → 重试一次；
-    - 仍失败 → 改用纯文本模式再生成一次（不带 response_format）；
+    - JSON 模式失败 → 按规格重试一次；
+    - 仍失败 → 改用纯文本模式再生成（仍先尝试按 JSON 解析，再按散文解析）；
+    - 连续失败达上限后，本进程后续轮次直接走纯文本模式，节省一次请求；
     - 仍失败 → 返回预设兜底文本。
     """
+    global _json_mode_failures
+
     messages = [
         {"role": "system", "content": config.NARRATOR_SYSTEM_PROMPT},
         {"role": "user", "content": prompt_user_text},
     ]
 
-    # JSON 模式：最多两次
-    for _ in range(2):
+    # JSON 模式：失败两次即降级（已降级则跳过）
+    for _ in range(2 if _json_mode_failures < 2 else 0):
         content = _safe_completion(messages, json_mode=True)
         parsed = _try_narrative(content)
         if parsed is not None:
+            _json_mode_failures = 0
             return parsed
+        _json_mode_failures += 1
         _dump_debug("narrate-json", content)
 
-    # 纯文本兜底：部分模型对 JSON 模式支持不佳，改用自然文本再试一次
+    # 纯文本模式：模型多半仍会输出 JSON，所以先按 JSON 解析，失败再按散文解析
     content = _safe_completion(messages, json_mode=False)
-    parsed = _parse_plain_narrative(content)
+    parsed = _try_narrative(content) or _parse_plain_narrative(content)
     if parsed is not None:
-        log.info("叙事 JSON 模式失败，已改用纯文本模式成功生成。")
+        log.info("已改用纯文本模式生成叙事。")
         return parsed
     _dump_debug("narrate-text", content)
 
-    log.warning("叙事两次 JSON + 一次纯文本均失败，使用兜底文本。")
+    log.warning("叙事 JSON 模式与纯文本模式均失败，使用兜底文本。")
     return {"narrative": FALLBACK_NARRATIVE, "options": FALLBACK_OPTIONS}
 
 
@@ -270,8 +279,9 @@ def json_completion(system, user, temperature=0.8):
         {"role": "user", "content": user},
     ]
     last = ""
-    for _ in range(2):  # 最多两次尝试
-        last = _safe_completion(messages)
+    # 依次尝试：JSON 模式 → 纯文本模式（部分模型对 JSON 模式返回空）→ 再试一次
+    for json_mode in (True, False, False):
+        last = _safe_completion(messages, json_mode=json_mode)
         if not last:
             continue
         try:
@@ -279,6 +289,6 @@ def json_completion(system, user, temperature=0.8):
             if isinstance(data, dict):
                 return data
         except Exception:  # noqa: BLE001
-            continue
+            pass
         _dump_debug("json_completion", last)
     return {}

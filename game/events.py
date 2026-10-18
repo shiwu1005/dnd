@@ -74,7 +74,14 @@ def fire_event(conn, save_id, terrain, level, current_turn):
         "请自然融入叙事，不得改变事件类型和核心事实。"
     )
     log.info("触发事件 %s（type=%s）", ev["name"], ev["event_type"])
-    return prompt
+    # 返回结构化信息：prompt 用于注入，name/skeleton 用于界面展示
+    return {
+        "id": ev["id"],
+        "name": ev["name"],
+        "event_type": ev["event_type"],
+        "skeleton": ev["skeleton"],
+        "prompt": prompt,
+    }
 
 
 # 供事件骨架使用的事件类型（关系节点事件等复用 events 表）

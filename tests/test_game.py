@@ -73,8 +73,10 @@ def test_events_pool_and_cooldown():
     ev = events.pick_event(conn, sid, "grassland", 2, 1)
     assert ev is not None, "grassland 应有候选事件"
     assert ev["event_type"] in ("discovery", "social", "hazard")
-    hint = events.fire_event(conn, sid, "grassland", 2, 5)
-    assert hint is not None and "事件骨架" in hint
+    ev = events.fire_event(conn, sid, "grassland", 2, 5)
+    assert ev is not None and "事件骨架" in ev["prompt"]
+    assert ev["name"] and ev["skeleton"]
+    assert ev["event_type"] in ("discovery", "social", "hazard")
     # cooldown 内不再抽到同一事件
     conn.close()
     db.delete_save(sid)
@@ -158,22 +160,34 @@ def test_full_game_loop():
         r = sess.run_turn(f"继续冒险，第{i+1}轮行动")
         assert r["narrative"], "每轮都应有叙述"
         assert r["options"], "每轮都应有选项"
-        assert "事件" in r.get("event_hint", "") if r.get("event_hint") else True
-    # 存档计数
+        ev = r.get("event")
+        assert ev is None or ("name" in ev and "skeleton" in ev)
+    # 存档计数：玩家 + 叙述者各 5 条，另有 5 条选项记录
     turns = conn.execute(
-        "SELECT COUNT(*) c FROM turns WHERE save_id=?", (sid,)
+        "SELECT COUNT(*) c FROM turns WHERE save_id=? AND role IN ('player','narrator')", (sid,)
     ).fetchone()["c"]
     assert turns == 10, f"应存 5 轮 x 2 条=10，实际 {turns}"
+    opt_rows = conn.execute(
+        "SELECT COUNT(*) c FROM turns WHERE save_id=? AND role='options'", (sid,)
+    ).fetchone()["c"]
+    assert opt_rows == 5, f"应存 5 条选项记录，实际 {opt_rows}"
     # 队友已入队
     active = comp_mod.get_active_companions(conn, sid)
     assert len(active) == 1
     # 加载存档（不重新生成世界书）
     state = saves.load_save_state(sid)
     assert state["player"] is not None
+    # 读档回顾与选项恢复
+    sess2, st2 = engine.load_game_cli(sid)
+    assert st2["recap"], "读档应返回上次对话"
+    assert st2["recap"][-1]["role"] == "narrator", "回顾最后一条应为叙述者回复"
+    assert st2["options"], "读档应恢复上次的行动选项"
+    assert len(st2["options"]) == len(sess.current_options)
+    sess2.close()
     sess.close()
     conn.close()
     db.delete_save(sid)
-    print("[OK] 完整游戏循环（开场/行动/存turns/加载）")
+    print("[OK] 完整游戏循环（开场/行动/存turns/读档回顾）")
 
 
 def test_prompt_assembly():

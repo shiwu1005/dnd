@@ -28,6 +28,18 @@ for _noisy in ("httpx", "httpx2", "httpcore", "httpcore2", "openai"):
 setup_console()
 
 
+class _Exit(Exception):
+    """输入流结束或用户中止时用于干净退出。"""
+
+
+def ask(text):
+    """安全的输入封装：EOF / Ctrl+C 时抛出 _Exit，避免打印 traceback。"""
+    try:
+        return safe_text(input(text)).strip()
+    except (EOFError, KeyboardInterrupt):
+        raise _Exit from None
+
+
 def banner():
     print("=" * 50)
     print("  文字 D&D 冒险（DeepSeek 驱动）")
@@ -42,7 +54,7 @@ def main_menu():
         print("  3) 列出存档")
         print("  4) 删除存档")
         print("  0) 退出")
-        choice = input("请选择：").strip()
+        choice = ask("请选择：")
         if choice == "1":
             new_game_flow()
         elif choice == "2":
@@ -56,29 +68,29 @@ def main_menu():
 
 
 def new_game_flow():
-    name = safe_text(input("存档名称：")).strip() or "无名冒险"
+    name = ask("存档名称：") or "无名冒险"
     print("\n世界设定来源（二选一）：")
     print("  1) 输入你自己的世界描述")
     print("  2) 从预设 Wiki 搜索关键词")
-    src = input("选择(1/2)：").strip()
+    src = ask("选择(1/2)：")
     world_desc = None
     wiki_api = None
     wiki_kw = None
     if src == "1":
-        world_desc = safe_text(input("简要描述你的世界设定：")).strip() or None
+        world_desc = ask("简要描述你的世界设定：") or None
     elif src == "2":
         print("可选 Wiki：")
         for k, w in config.PRESET_WIKIS.items():
             print(f"  {k}: {w['label']}")
-        wkey = input("输入 Wiki 键（如 dnd_cn / forgottenrealms / criticalrole / custom）：").strip()
+        wkey = ask("输入 Wiki 键（如 dnd_cn / forgottenrealms / criticalrole / custom）：")
         wiki_cfg = config.PRESET_WIKIS.get(wkey)
         if wiki_cfg is None:
             print("无效 Wiki，使用默认世界观。")
         else:
             wiki_api = wiki_cfg["api"]
             if wkey == "custom":
-                wiki_api = safe_text(input("输入自定义 api.php 地址：")).strip() or None
-            wiki_kw = safe_text(input("输入搜索关键词：")).strip() or "dungeons dragons"
+                wiki_api = ask("输入自定义 api.php 地址：") or None
+            wiki_kw = ask("输入搜索关键词：") or "dungeons dragons"
     print("\n正在生成世界书…（可能需要一点时间）")
     sess, msg = engine.new_game_cli(name, world_desc, wiki_api, wiki_kw)
     play_loop(sess, msg)
@@ -92,7 +104,7 @@ def load_game_flow():
     for s in saves:
         print(f"  [{s['save_id']}] {s['name']} ({s['created_at']})")
     try:
-        sid = int(input("输入要加载的存档编号：").strip())
+        sid = int(ask("输入要加载的存档编号："))
     except ValueError:
         print("无效编号。")
         return
@@ -100,7 +112,12 @@ def load_game_flow():
     if sess is None:
         print("存档不存在。")
         return
-    play_loop(sess, "继续你的冒险…")
+    play_loop(
+        sess,
+        f"继续你的冒险…（存档：{state['save']['name']}）",
+        recap=state.get("recap"),
+        options=state.get("options"),
+    )
 
 
 def list_saves_flow():
@@ -115,7 +132,7 @@ def list_saves_flow():
 def delete_save_flow():
     list_saves_flow()
     try:
-        sid = int(input("输入要删除的存档编号：").strip())
+        sid = int(ask("输入要删除的存档编号："))
     except ValueError:
         print("无效编号。")
         return
@@ -123,9 +140,42 @@ def delete_save_flow():
     print("已删除。")
 
 
-def play_loop(sess, opening):
-    print("\n" + opening)
+def print_options(options):
+    if not options:
+        return
+    print("\n行动选项：")
+    for i, o in enumerate(options, 1):
+        print(f"  {i}) {o}")
+
+
+def print_recap(recap):
+    """读档时显示上次的进度（玩家最后行动 + 叙述者最后回复）。"""
+    if not recap:
+        print("（这是新存档，还没有历史记录。）")
+        return
+    print("\n" + "=" * 50)
+    print("　上次冒险回顾")
+    print("=" * 50)
+    for t in recap:
+        if t["role"] == "player":
+            print(f"\n你：{t['content']}")
+        else:
+            print(f"\n{t['content']}")
+    print("\n" + "=" * 50)
+
+
+def play_loop(sess, opening, recap=None, options=None):
+    if recap is not None:
+        print_recap(recap)
+    else:
+        print("\n" + opening)
     print("-" * 50)
+
+    current_options = list(options) if options else list(getattr(sess, "current_options", []) or [])
+    if recap is not None:
+        print_options(current_options)
+        print("（可输入编号选择，或直接输入你的行动）")
+
     while True:
         try:
             act = safe_text(input("你的行动：")).strip()
@@ -140,12 +190,26 @@ def play_loop(sess, opening):
             db.touch_save(sess.save_id)
             print("已保存。")
             continue
+        if act in ("选项", "options"):
+            print_options(current_options)
+            continue
+
+        # 编号选择：把 "1" 映射为对应的选项文本
+        if act.isdigit() and current_options:
+            idx = int(act)
+            if 1 <= idx <= len(current_options):
+                act = current_options[idx - 1]
+                print(f"（你选择了：{act}）")
+            else:
+                print(f"没有第 {idx} 个选项。")
+                continue
+
         # 玩家主动交谈语法：/talk 队友编号
         talk_id = None
         if act.startswith("/talk "):
             try:
                 talk_id = int(act.split(" ", 1)[1])
-                act = f"（继续与队友交谈）"
+                act = "（继续与队友交谈）"
             except ValueError:
                 pass
 
@@ -153,12 +217,11 @@ def play_loop(sess, opening):
         print("\n" + result["narrative"])
         if result.get("companion_interaction"):
             print(f"\n〔同伴互动〕{result['companion_interaction']}")
-        if result.get("event_hint"):
-            print(f"\n〔事件〕{result['event_hint']}")
-        if result.get("options"):
-            print("\n行动选项：")
-            for i, o in enumerate(result["options"], 1):
-                print(f"  {i}) {o}")
+        ev = result.get("event")
+        if ev:
+            print(f"\n〔突发事件·{ev['name']}〕{ev['skeleton']}")
+        current_options = list(result.get("options") or [])
+        print_options(current_options)
 
 
 def ensure_api_key():
@@ -170,9 +233,9 @@ def ensure_api_key():
         return True
     print("\n检测到未设置 DEEPSEEK_API_KEY。")
     print("DeepSeek 需要 API Key 才能生成叙事（不设置则使用预设兜底文本，体验有限）。")
-    ans = input("是否现在输入 API Key？(y/n)：").strip().lower()
+    ans = ask("是否现在输入 API Key？(y/n)：").lower()
     if ans in ("y", "yes", "是"):
-        key = safe_text(input("请输入 DeepSeek API Key：")).strip()
+        key = ask("请输入 DeepSeek API Key：")
         if key:
             os.environ["DEEPSEEK_API_KEY"] = key
             config.DEEPSEEK_API_KEY = key
@@ -186,15 +249,19 @@ def main():
     parser.add_argument("--new", help="直接新建游戏并给定名字")
     args = parser.parse_args()
 
-    db.init_db()
-    ensure_api_key()
-    if args.new:
-        name = args.new
-        sess, msg = engine.new_game_cli(name)
-        play_loop(sess, msg)
-    else:
-        banner()
-        main_menu()
+    try:
+        db.init_db()
+        ensure_api_key()
+        if args.new:
+            sess, msg = engine.new_game_cli(args.new)
+            play_loop(sess, msg)
+            sess.close()
+        else:
+            banner()
+            main_menu()
+    except _Exit:
+        # 输入流结束 / Ctrl+C：正常退出，不打印 traceback
+        print("\n再见！")
 
 
 if __name__ == "__main__":

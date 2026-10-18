@@ -23,7 +23,8 @@ SUMMARY_SYSTEM = (
 def recent_turns(conn, save_id, n):
     """取最近 n 轮对话（narrator + player 交错），不含系统注入文本。"""
     rows = conn.execute(
-        "SELECT role, content FROM turns WHERE save_id=? ORDER BY id DESC LIMIT ?",
+        "SELECT role, content FROM turns WHERE save_id=? AND role IN ('player','narrator') "
+        "ORDER BY id DESC LIMIT ?",
         (save_id, n * 2),
     ).fetchall()
     rows = list(reversed(rows))

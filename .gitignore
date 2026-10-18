@@ -1,0 +1,28 @@
+# ---- Python / PyInstaller ----
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+*.egg-info/
+.venv/
+venv/
+
+# ---- 游戏数据库（存档、进度）----
+*.db
+*.sqlite
+*.sqlite3
+
+# ---- 环境变量 / 密钥（切勿提交真实 key）----
+.env
+.env.local
+*.env
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- 日志 ----
+*.log

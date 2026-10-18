@@ -13,11 +13,15 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from game import config, db, engine, worldbook  # noqa: E402
+from game.textutil import safe_text, setup_console  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+
+# Windows 下切换到 UTF-8 控制台代码页，避免中文乱码/代理字符
+setup_console()
 
 
 def banner():
@@ -48,7 +52,7 @@ def main_menu():
 
 
 def new_game_flow():
-    name = input("存档名称：").strip() or "无名冒险"
+    name = safe_text(input("存档名称：")).strip() or "无名冒险"
     print("\n世界设定来源（二选一）：")
     print("  1) 输入你自己的世界描述")
     print("  2) 从预设 Wiki 搜索关键词")
@@ -57,7 +61,7 @@ def new_game_flow():
     wiki_api = None
     wiki_kw = None
     if src == "1":
-        world_desc = input("简要描述你的世界设定：").strip() or None
+        world_desc = safe_text(input("简要描述你的世界设定：")).strip() or None
     elif src == "2":
         print("可选 Wiki：")
         for k, w in config.PRESET_WIKIS.items():
@@ -69,8 +73,8 @@ def new_game_flow():
         else:
             wiki_api = wiki_cfg["api"]
             if wkey == "custom":
-                wiki_api = input("输入自定义 api.php 地址：").strip() or None
-            wiki_kw = input("输入搜索关键词：").strip() or "dungeons dragons"
+                wiki_api = safe_text(input("输入自定义 api.php 地址：")).strip() or None
+            wiki_kw = safe_text(input("输入搜索关键词：")).strip() or "dungeons dragons"
     print("\n正在生成世界书…（可能需要一点时间）")
     sess, msg = engine.new_game_cli(name, world_desc, wiki_api, wiki_kw)
     play_loop(sess, msg)
@@ -120,7 +124,7 @@ def play_loop(sess, opening):
     print("-" * 50)
     while True:
         try:
-            act = input("你的行动：").strip()
+            act = safe_text(input("你的行动：")).strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not act:
@@ -164,7 +168,7 @@ def ensure_api_key():
     print("DeepSeek 需要 API Key 才能生成叙事（不设置则使用预设兜底文本，体验有限）。")
     ans = input("是否现在输入 API Key？(y/n)：").strip().lower()
     if ans in ("y", "yes", "是"):
-        key = input("请输入 DeepSeek API Key：").strip()
+        key = safe_text(input("请输入 DeepSeek API Key：")).strip()
         if key:
             os.environ["DEEPSEEK_API_KEY"] = key
             config.DEEPSEEK_API_KEY = key

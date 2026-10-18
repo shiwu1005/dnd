@@ -94,3 +94,22 @@ python tests/test_game.py
 - 被遗忘国度（英文）：https://forgottenrealms.fandom.com/api.php
 - Critical Role 设定（英文）：https://criticalrole.fandom.com/api.php
 - 自定义：用户填 api.php
+
+## 常见问题
+
+**Q：只给一个 `TextDND.exe` 就能运行吗？**
+
+可以。`dist/TextDND.exe` 是 PyInstaller 单文件程序，已内置 Python 解释器与
+所需运行库，**目标机器无需安装 Python 或任何依赖**。但请注意：
+
+- 需要 **Windows 10/11 64 位**（打包于 64 位环境）。
+- 需要**联网**访问 `api.deepseek.com`，并准备 **DeepSeek API Key**；
+  没有 Key 也能启动，但只能使用预设兜底文本（无真实叙事）。
+- 首次启动会向临时目录解压，**启动需数秒**；之后更快。
+- 存档数据库 `game.db` 会自动创建在 **exe 同目录**，复制 exe 到别处即独立存档。
+- 若 Windows 提示「未知发布者」，属正常的未签名程序提示，选择「仍要运行」即可。
+
+**Q：中文显示乱码？**
+
+程序启动时会自动把控制台切到 UTF-8 代码页（65001），一般不会乱码。
+若仍异常，可先执行 `chcp 65001` 再运行。

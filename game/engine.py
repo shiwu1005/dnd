@@ -100,6 +100,10 @@ class GameSession:
         """
         self.turn_number += 1
 
+        # 清洗玩家输入：控制台可能产生孤立代理字符，既不能存库也不能发请求
+        from .textutil import safe_text
+        player_input = safe_text(player_input)
+
         # 玩家主动交谈注入
         talk = None
         if talk_companion_id:
@@ -141,10 +145,11 @@ class GameSession:
 
     def _store_turn(self, role, content):
         from datetime import datetime
+        from .textutil import safe_text
         now = datetime.now().isoformat(timespec="seconds")
         self.conn.execute(
             "INSERT INTO turns (save_id, role, content, created_at) VALUES (?,?,?,?)",
-            (self.save_id, role, content, now),
+            (self.save_id, role, safe_text(content), now),
         )
         self.conn.commit()
 

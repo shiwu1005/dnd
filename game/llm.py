@@ -54,7 +54,11 @@ def chat_completion(messages, response_format=None, temperature=0.8, max_tokens=
     for attempt in range(config.LLM_MAX_RETRIES):
         try:
             resp = client.chat.completions.create(**kwargs)
-            content = resp.choices[0].message.content or ""
+            msg = resp.choices[0].message
+            content = msg.content or ""
+            if not content:
+                # 部分模型把最终文本放在 reasoning_content 字段
+                content = getattr(msg, "reasoning_content", None) or ""
             return content
         except Exception as e:  # noqa: BLE001 —— 网络/限流/解析错误都降级
             last_err = e
@@ -62,21 +66,52 @@ def chat_completion(messages, response_format=None, temperature=0.8, max_tokens=
     raise LLMError(f"LLM 调用在 {config.LLM_MAX_RETRIES} 次重试后仍失败: {last_err}")
 
 
-def _parse_json(text):
-    """尽力从 LLM 输出中提取 JSON 对象。"""
+def _strip_fences(text):
+    """去除 markdown 代码围栏。"""
     text = text.strip()
-    # 去除可能的 markdown 代码围栏
     if text.startswith("```"):
-        text = text.strip("`")
-        text = text.strip()
-        if text.startswith("json"):
+        text = text.strip("`").strip()
+        if text[:4].lower() == "json":
             text = text[4:].strip()
-    # 截取第一个 { 到最后一个 }
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("输出中未找到 JSON 对象")
-    return json.loads(text[start:end + 1])
+    return text
+
+
+def _iter_json_objects(text):
+    """扫描文本中所有可解析的 JSON 对象（容忍前后缀、多个对象、代码围栏）。"""
+    text = _strip_fences(text)
+    decoder = json.JSONDecoder()
+    idx = 0
+    found = []
+    while True:
+        start = text.find("{", idx)
+        if start == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(text[start:])
+        except ValueError:
+            idx = start + 1
+            continue
+        found.append(obj)
+        idx = start + end
+    return found
+
+
+def _parse_json(text):
+    """尽力从 LLM 输出中提取 JSON 对象。
+
+    依次尝试：去围栏后的整体解析 → 扫描出的第一个字典。
+    """
+    text = _strip_fences(text)
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except Exception:  # noqa: BLE001
+        pass
+    for obj in _iter_json_objects(text):
+        if isinstance(obj, dict):
+            return obj
+    raise ValueError("输出中未找到可解析的 JSON 对象")
 
 
 # ---- 兜底文本 ----
@@ -92,38 +127,67 @@ def narrate(prompt_user_text, options_hint=None):
 
     重试逻辑：
     - JSON 解析失败或 narrative 为空 → 重试一次；
+    - 仍失败 → 改用纯文本模式再生成一次（不带 response_format）；
     - 仍失败 → 返回预设兜底文本。
-
-    返回:
-        dict: {"narrative": str, "options": [str,...]}
     """
     messages = [
         {"role": "system", "content": config.NARRATOR_SYSTEM_PROMPT},
         {"role": "user", "content": prompt_user_text},
     ]
 
-    # 第一次尝试
-    content = _safe_completion(messages)
-    parsed = _try_narrative(content)
-    if parsed is not None:
-        return parsed
+    # JSON 模式：最多两次
+    for _ in range(2):
+        content = _safe_completion(messages, json_mode=True)
+        parsed = _try_narrative(content)
+        if parsed is not None:
+            return parsed
+        _dump_debug("narrate-json", content)
 
-    # 重试一次（重新调用）
-    content = _safe_completion(messages)
-    parsed = _try_narrative(content)
+    # 纯文本兜底：部分模型对 JSON 模式支持不佳，改用自然文本再试一次
+    content = _safe_completion(messages, json_mode=False)
+    parsed = _parse_plain_narrative(content)
     if parsed is not None:
+        log.info("叙事 JSON 模式失败，已改用纯文本模式成功生成。")
         return parsed
+    _dump_debug("narrate-text", content)
 
-    log.warning("叙事 JSON 两次解析失败，使用兜底文本。")
+    log.warning("叙事两次 JSON + 一次纯文本均失败，使用兜底文本。")
     return {"narrative": FALLBACK_NARRATIVE, "options": FALLBACK_OPTIONS}
 
 
-def _safe_completion(messages):
+def _safe_completion(messages, json_mode=True):
     """带兜底的 chat_completion：调用失败时返回空串（由调用方判定重试/兜底）。"""
     try:
-        return chat_completion(messages, response_format={"type": "json_object"})
+        fmt = {"type": "json_object"} if json_mode else None
+        return chat_completion(messages, response_format=fmt)
     except LLMError:
         return ""
+
+
+def _dump_debug(tag, content):
+    """在设置 DND_DEBUG_LLM=1 时，把原始响应写入 llm_debug.log 便于排查。"""
+    import os
+
+    if os.environ.get("DND_DEBUG_LLM") not in ("1", "true", "yes"):
+        return
+    try:
+        path = os.path.join(config.APP_DIR, "llm_debug.log")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"\n===== {tag} =====\n{content!r}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_NARRATIVE_KEYS = ("narrative", "text", "story", "description", "scene")
+
+
+def _coerce_options(raw, fallback=True):
+    """把 options 归一化成字符串列表。"""
+    if isinstance(raw, list):
+        opts = [str(o).strip() for o in raw if str(o).strip()]
+        if opts:
+            return opts[:4]
+    return list(FALLBACK_OPTIONS) if fallback else []
 
 
 def _try_narrative(content):
@@ -136,16 +200,63 @@ def _try_narrative(content):
         return None
     if not isinstance(data, dict):
         return None
-    narrative = data.get("narrative")
-    options = data.get("options")
-    if not narrative or not isinstance(narrative, str) or not narrative.strip():
+    narrative = None
+    for key in _NARRATIVE_KEYS:
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            narrative = val.strip()
+            break
+    if not narrative:
         return None
-    if not isinstance(options, list) or not options:
-        options = FALLBACK_OPTIONS
-    options = [str(o) for o in options if str(o).strip()][:4]
-    if not options:
-        options = FALLBACK_OPTIONS
-    return {"narrative": narrative.strip(), "options": options}
+    return {"narrative": narrative, "options": _coerce_options(data.get("options"))}
+
+
+def _parse_plain_narrative(content):
+    """把纯文本叙事解析成 {narrative, options}。
+
+    约定模型输出「叙述段落 + 编号选项」。按行识别选项，
+    无法识别时整段作为叙事、使用默认选项。
+    """
+    if not content or not content.strip():
+        return None
+    import re
+
+    lines = content.strip().splitlines()
+    option_re = re.compile(r"^\s*(?:[\(\（]?([1-9１-９])[\)\）\.、．:：]|[-*•])\s*(.+?)\s*$")
+
+    def _is_header(ln):
+        """只把独占一行的『选项/行动选项』当作标题，避免误吞选项行或正文。"""
+        s = ln.strip().strip("*#-• ").strip()
+        return bool(re.fullmatch(r"(?:行动)?选项[：:]?", s))
+
+    header_idx = next((i for i, ln in enumerate(lines) if _is_header(ln)), None)
+    options = []
+    narrative_lines = []
+    for i, ln in enumerate(lines):
+        if header_idx is not None and i <= header_idx:
+            if i < header_idx:
+                narrative_lines.append(ln)
+            continue
+        m = option_re.match(ln)
+        if m:
+            options.append(m.group(2).strip())
+        elif options:
+            # 选项之后的多余说明，忽略
+            continue
+        else:
+            narrative_lines.append(ln)
+
+    if header_idx is None and not options:
+        # 没有任何选项标记：整段都是叙事
+        return {"narrative": content.strip(), "options": list(FALLBACK_OPTIONS)}
+
+    narrative = "\n".join(narrative_lines).strip()
+    if not narrative:
+        return None
+    return {
+        "narrative": narrative,
+        "options": _coerce_options(options),
+    }
 
 
 def json_completion(system, user, temperature=0.8):
@@ -169,4 +280,5 @@ def json_completion(system, user, temperature=0.8):
                 return data
         except Exception:  # noqa: BLE001
             continue
+        _dump_debug("json_completion", last)
     return {}

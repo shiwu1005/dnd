@@ -20,6 +20,10 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
+# 抑制底层 HTTP 客户端的逐请求日志，保持界面清爽
+for _noisy in ("httpx", "httpx2", "httpcore", "httpcore2", "openai"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 # Windows 下切换到 UTF-8 控制台代码页，避免中文乱码/代理字符
 setup_console()
 

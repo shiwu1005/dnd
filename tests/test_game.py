@@ -192,6 +192,32 @@ def test_prompt_assembly():
     print("[OK] Prompt 组装顺序")
 
 
+def test_narrative_parsing_robustness():
+    fence = "```"
+    # 代码围栏包裹
+    r = llm._try_narrative(
+        fence + 'json\n{"narrative":"风雪掠过冰原。","options":["前进","扎营"]}\n' + fence
+    )
+    assert r == {"narrative": "风雪掠过冰原。", "options": ["前进", "扎营"]}
+    # JSON 前后有废话
+    r = llm._try_narrative('好的：\n{"narrative":"你推开门。","options":["进入"]}')
+    assert r["narrative"] == "你推开门。"
+    # 多个对象取第一个
+    r = llm._try_narrative('{"narrative":"甲"}{"options":["乙"]}')
+    assert r["narrative"] == "甲"
+    # 纯文本兜底解析
+    r = llm._parse_plain_narrative("你走进洞穴。\n\n行动选项：\n1) 深入\n2) 返回")
+    assert r == {"narrative": "你走进洞穴。", "options": ["深入", "返回"]}
+    # 无选项标记 → 整段叙事 + 默认选项
+    r = llm._parse_plain_narrative("只有叙事的一段描写。")
+    assert r["narrative"] == "只有叙事的一段描写。"
+    assert r["options"] == llm.FALLBACK_OPTIONS
+    # 短横线选项，且不吞第一个
+    r = llm._parse_plain_narrative("叙事A\n- 选项甲\n- 选项乙")
+    assert r["options"] == ["选项甲", "选项乙"]
+    print("[OK] 叙事解析健壮性（围栏/废话/纯文本）")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

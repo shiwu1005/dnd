@@ -17,6 +17,9 @@ venv/
 .env
 .env.local
 *.env
+# 本机保存的 API Key（DPAPI 密文）与调试日志
+key.dat
+llm_debug.log
 
 # ---- 编辑器 / 系统 ----
 .vscode/

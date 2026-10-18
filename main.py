@@ -12,7 +12,7 @@ import sys
 # 确保可独立运行
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from game import config, db, engine, worldbook  # noqa: E402
+from game import config, db, engine, secrets, worldbook  # noqa: E402
 from game.textutil import safe_text, setup_console  # noqa: E402
 
 logging.basicConfig(
@@ -116,7 +116,6 @@ def load_game_flow():
         sess,
         f"继续你的冒险…（存档：{state['save']['name']}）",
         recap=state.get("recap"),
-        options=state.get("options"),
     )
 
 
@@ -140,14 +139,6 @@ def delete_save_flow():
     print("已删除。")
 
 
-def print_options(options):
-    if not options:
-        return
-    print("\n行动选项：")
-    for i, o in enumerate(options, 1):
-        print(f"  {i}) {o}")
-
-
 def print_recap(recap):
     """读档时显示上次的进度（玩家最后行动 + 叙述者最后回复）。"""
     if not recap:
@@ -164,17 +155,13 @@ def print_recap(recap):
     print("\n" + "=" * 50)
 
 
-def play_loop(sess, opening, recap=None, options=None):
+def play_loop(sess, opening, recap=None):
     if recap is not None:
         print_recap(recap)
     else:
         print("\n" + opening)
     print("-" * 50)
-
-    current_options = list(options) if options else list(getattr(sess, "current_options", []) or [])
-    if recap is not None:
-        print_options(current_options)
-        print("（可输入编号选择，或直接输入你的行动）")
+    print("（直接输入你的行动；输入 退出 结束，保存 存档）")
 
     while True:
         try:
@@ -190,19 +177,6 @@ def play_loop(sess, opening, recap=None, options=None):
             db.touch_save(sess.save_id)
             print("已保存。")
             continue
-        if act in ("选项", "options"):
-            print_options(current_options)
-            continue
-
-        # 编号选择：把 "1" 映射为对应的选项文本
-        if act.isdigit() and current_options:
-            idx = int(act)
-            if 1 <= idx <= len(current_options):
-                act = current_options[idx - 1]
-                print(f"（你选择了：{act}）")
-            else:
-                print(f"没有第 {idx} 个选项。")
-                continue
 
         # 玩家主动交谈语法：/talk 队友编号
         talk_id = None
@@ -220,17 +194,24 @@ def play_loop(sess, opening, recap=None, options=None):
         ev = result.get("event")
         if ev:
             print(f"\n〔突发事件·{ev['name']}〕{ev['skeleton']}")
-        current_options = list(result.get("options") or [])
-        print_options(current_options)
 
 
 def ensure_api_key():
-    """若未设置 DEEPSEEK_API_KEY，则提示用户输入（存到进程环境，供本次运行使用）。
+    """确保有可用的 API Key。
 
-    返回是否已就绪（有 key 或用户愿意无 key 使用兜底）。
+    优先级：环境变量 → 本机已保存的 Key → 交互输入（输入后自动记住）。
+    返回 True 表示有 Key；False 表示用户选择无 Key 运行（兜底文本）。
     """
     if config.DEEPSEEK_API_KEY:
         return True
+
+    saved = secrets.load_key()
+    if saved:
+        config.DEEPSEEK_API_KEY = saved
+        os.environ["DEEPSEEK_API_KEY"] = saved
+        print("已载入本机保存的 API Key（无需再次输入）。")
+        return True
+
     print("\n检测到未设置 DEEPSEEK_API_KEY。")
     print("DeepSeek 需要 API Key 才能生成叙事（不设置则使用预设兜底文本，体验有限）。")
     ans = ask("是否现在输入 API Key？(y/n)：").lower()
@@ -239,17 +220,35 @@ def ensure_api_key():
         if key:
             os.environ["DEEPSEEK_API_KEY"] = key
             config.DEEPSEEK_API_KEY = key
+            if secrets.save_key(key):
+                print(f"已记住该 Key（加密保存于 {secrets.key_path()}），下次启动无需再输入。")
+            else:
+                print("注意：Key 未能保存到本机，下次启动需要重新输入。")
             return True
     print("将使用兜底文本模式（无实时叙事）。")
-    return True
+    return False
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--new", help="直接新建游戏并给定名字")
+    parser.add_argument("--forget-key", action="store_true", help="删除本机保存的 API Key")
+    parser.add_argument("--set-key", metavar="KEY", help="设置并保存 API Key")
     args = parser.parse_args()
 
     try:
+        if args.forget_key:
+            if secrets.forget_key():
+                print("已删除本机保存的 API Key。")
+            else:
+                print("本机没有保存的 API Key。")
+            return
+
+        if args.set_key:
+            ok = secrets.save_key(args.set_key)
+            print("已保存 API Key。" if ok else "保存失败。")
+            return
+
         db.init_db()
         ensure_api_key()
         if args.new:

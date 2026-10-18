@@ -27,35 +27,36 @@ export DEEPSEEK_API_KEY="你的key"
 ```
 
 > ⚠️ **安全提醒**：API Key 通过环境变量传入，**不要写进代码或提交到 Git**。
-> 本仓库已配置 `.gitignore`，会忽略 `.env`、`*.db` 等敏感/数据文件。
-> 首次运行 exe 时若未设置环境变量，程序也会提示你临时输入 Key。
+> 本仓库已配置 `.gitignore`，会忽略 `.env`、`*.db`、`key.dat` 等敏感/数据文件。
+> 首次运行 exe 时若未设置环境变量，程序会提示输入 Key，并**自动记住**
+> （Windows 下用 DPAPI 加密，只能由当前 Windows 用户解密），下次启动不再询问。
 
 ## 本地构建可执行文件（PyInstaller）
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --console --name TextDND main.py
+pyinstaller --onefile --console --name TextDND --exclude-module numpy --exclude-module pandas main.py
 # 产物在 dist/TextDND.exe；game.db 会在运行时自动创建在 exe 旁
 ```
 
 ## 运行
 
 ```bash
-python main.py            # 进入主菜单（新建/加载/列表/删除）
-python main.py --new 存档名   # 直接新建
+python main.py                  # 进入主菜单（新建/加载/列表/删除）
+python main.py --new 存档名      # 直接新建
+python main.py --set-key KEY    # 设置并保存 API Key（下次免输入）
+python main.py --forget-key     # 删除本机保存的 API Key
 ```
 
 游戏内指令：
 
-- 直接输入文本 → 作为玩家行动
-- 输入编号（如 `1`）→ 直接选择上一条给出的对应行动选项
-- `选项` / `options` → 重新显示当前可选行动
+- 直接输入文本 → 作为玩家行动（本作不提供预设选项，行动完全自由）
 - `/talk 队友编号` → 主动与某队友交谈
 - `保存` / `save` → 手动保存
 - `退出` / `quit` → 退出（回到主菜单）
 
-**读档**时会先显示「上次冒险回顾」：你最后的行动、叙述者最后的回复，
-以及当时的行动选项，可以输入编号无缝接着玩。
+**读档**时会先显示「上次冒险回顾」：你最后的行动与叙述者最后的回复，
+接着直接输入你的下一步行动即可。
 
 ## 项目结构
 
@@ -64,6 +65,7 @@ game/
   config.py      全局配置、预设 Wiki、关键词黑名单
   db.py          SQLite 连接、建表、事件/梗种子
   llm.py         DeepSeek 调用封装（JSON Output、重试、兜底）
+  secrets.py     API Key 本机加密保存（Windows DPAPI）
   worldbook.py   世界书生成（用户描述 / Wiki 搜索）+ 候选队友
   memory.py      长线摘要（15-20 轮触发）
   events.py      固定事件池、加权随机、cooldown
@@ -71,6 +73,7 @@ game/
   companions.py  队友系统（HP/关系由代码维护、被动互动）
   memes.py       梗系统（触发判定、cooldown）
   saves.py       存档加载与 Prompt 组装
+  textutil.py    控制台 UTF-8 与非法字符清洗
   engine.py      游戏主循环（GameSession）
 tests/
   test_game.py   端到端测试（不依赖真实 LLM）

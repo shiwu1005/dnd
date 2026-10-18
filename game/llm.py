@@ -119,7 +119,6 @@ FALLBACK_NARRATIVE = (
     "你继续前行，四周的景物在变化，风声中似乎藏着什么，"
     "但你一时无法完全辨认。你意识到这场冒险还远未结束。"
 )
-FALLBACK_OPTIONS = ["继续前进", "观察四周", "稍作休息"]
 
 
 # 连续 JSON 模式失败计数：达到上限后本进程不再浪费一次调用去试 JSON 模式
@@ -127,7 +126,7 @@ _json_mode_failures = 0
 
 
 def narrate(prompt_user_text, options_hint=None):
-    """叙事调用：给定本轮用户输入，返回 {"narrative": str, "options": [str,...]}。
+    """叙事调用：给定本轮用户输入，返回 {"narrative": str}。
 
     重试逻辑：
     - JSON 模式失败 → 按规格重试一次；
@@ -161,7 +160,7 @@ def narrate(prompt_user_text, options_hint=None):
     _dump_debug("narrate-text", content)
 
     log.warning("叙事 JSON 模式与纯文本模式均失败，使用兜底文本。")
-    return {"narrative": FALLBACK_NARRATIVE, "options": FALLBACK_OPTIONS}
+    return {"narrative": FALLBACK_NARRATIVE}
 
 
 def _safe_completion(messages, json_mode=True):
@@ -190,15 +189,6 @@ def _dump_debug(tag, content):
 _NARRATIVE_KEYS = ("narrative", "text", "story", "description", "scene")
 
 
-def _coerce_options(raw, fallback=True):
-    """把 options 归一化成字符串列表。"""
-    if isinstance(raw, list):
-        opts = [str(o).strip() for o in raw if str(o).strip()]
-        if opts:
-            return opts[:4]
-    return list(FALLBACK_OPTIONS) if fallback else []
-
-
 def _try_narrative(content):
     """尝试把文本解析成叙事结果；失败返回 None。"""
     if not content:
@@ -217,55 +207,34 @@ def _try_narrative(content):
             break
     if not narrative:
         return None
-    return {"narrative": narrative, "options": _coerce_options(data.get("options"))}
+    return {"narrative": narrative}
+
+
+def _is_option_header(line):
+    """识别独占一行的『选项 / 行动选项』标题。"""
+    import re
+
+    s = line.strip().strip("*#-• ").strip()
+    return bool(re.fullmatch(r"(?:行动)?选项[：:]?", s))
 
 
 def _parse_plain_narrative(content):
-    """把纯文本叙事解析成 {narrative, options}。
+    """把纯文本输出归一化为叙事。
 
-    约定模型输出「叙述段落 + 编号选项」。按行识别选项，
-    无法识别时整段作为叙事、使用默认选项。
+    本作不再提供行动选项；若模型仍附带「选项」段落，直接丢弃该段。
     """
-    if not content or not content.strip():
+    text = (content or "").strip()
+    if not text:
         return None
-    import re
-
-    lines = content.strip().splitlines()
-    option_re = re.compile(r"^\s*(?:[\(\（]?([1-9１-９])[\)\）\.、．:：]|[-*•])\s*(.+?)\s*$")
-
-    def _is_header(ln):
-        """只把独占一行的『选项/行动选项』当作标题，避免误吞选项行或正文。"""
-        s = ln.strip().strip("*#-• ").strip()
-        return bool(re.fullmatch(r"(?:行动)?选项[：:]?", s))
-
-    header_idx = next((i for i, ln in enumerate(lines) if _is_header(ln)), None)
-    options = []
-    narrative_lines = []
+    lines = text.splitlines()
     for i, ln in enumerate(lines):
-        if header_idx is not None and i <= header_idx:
-            if i < header_idx:
-                narrative_lines.append(ln)
-            continue
-        m = option_re.match(ln)
-        if m:
-            options.append(m.group(2).strip())
-        elif options:
-            # 选项之后的多余说明，忽略
-            continue
-        else:
-            narrative_lines.append(ln)
-
-    if header_idx is None and not options:
-        # 没有任何选项标记：整段都是叙事
-        return {"narrative": content.strip(), "options": list(FALLBACK_OPTIONS)}
-
-    narrative = "\n".join(narrative_lines).strip()
+        if _is_option_header(ln):
+            lines = lines[:i]
+            break
+    narrative = "\n".join(lines).strip()
     if not narrative:
         return None
-    return {
-        "narrative": narrative,
-        "options": _coerce_options(options),
-    }
+    return {"narrative": narrative}
 
 
 def json_completion(system, user, temperature=0.8):

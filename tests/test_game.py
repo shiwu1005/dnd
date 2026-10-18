@@ -159,30 +159,24 @@ def test_full_game_loop():
     for i in range(5):
         r = sess.run_turn(f"继续冒险，第{i+1}轮行动")
         assert r["narrative"], "每轮都应有叙述"
-        assert r["options"], "每轮都应有选项"
+        assert "options" not in r, "本作不再提供行动选项"
         ev = r.get("event")
         assert ev is None or ("name" in ev and "skeleton" in ev)
-    # 存档计数：玩家 + 叙述者各 5 条，另有 5 条选项记录
+    # 存档计数：玩家 + 叙述者各 5 条
     turns = conn.execute(
         "SELECT COUNT(*) c FROM turns WHERE save_id=? AND role IN ('player','narrator')", (sid,)
     ).fetchone()["c"]
     assert turns == 10, f"应存 5 轮 x 2 条=10，实际 {turns}"
-    opt_rows = conn.execute(
-        "SELECT COUNT(*) c FROM turns WHERE save_id=? AND role='options'", (sid,)
-    ).fetchone()["c"]
-    assert opt_rows == 5, f"应存 5 条选项记录，实际 {opt_rows}"
     # 队友已入队
     active = comp_mod.get_active_companions(conn, sid)
     assert len(active) == 1
     # 加载存档（不重新生成世界书）
     state = saves.load_save_state(sid)
     assert state["player"] is not None
-    # 读档回顾与选项恢复
+    # 读档回顾
     sess2, st2 = engine.load_game_cli(sid)
     assert st2["recap"], "读档应返回上次对话"
     assert st2["recap"][-1]["role"] == "narrator", "回顾最后一条应为叙述者回复"
-    assert st2["options"], "读档应恢复上次的行动选项"
-    assert len(st2["options"]) == len(sess.current_options)
     sess2.close()
     sess.close()
     conn.close()
@@ -208,28 +202,47 @@ def test_prompt_assembly():
 
 def test_narrative_parsing_robustness():
     fence = "```"
-    # 代码围栏包裹
+    # 代码围栏包裹（模型可能仍附带 options，但本作只取叙事）
     r = llm._try_narrative(
         fence + 'json\n{"narrative":"风雪掠过冰原。","options":["前进","扎营"]}\n' + fence
     )
-    assert r == {"narrative": "风雪掠过冰原。", "options": ["前进", "扎营"]}
+    assert r == {"narrative": "风雪掠过冰原。"}
     # JSON 前后有废话
     r = llm._try_narrative('好的：\n{"narrative":"你推开门。","options":["进入"]}')
     assert r["narrative"] == "你推开门。"
     # 多个对象取第一个
     r = llm._try_narrative('{"narrative":"甲"}{"options":["乙"]}')
     assert r["narrative"] == "甲"
-    # 纯文本兜底解析
+    # 纯文本：若模型仍输出选项段落，应被裁掉
     r = llm._parse_plain_narrative("你走进洞穴。\n\n行动选项：\n1) 深入\n2) 返回")
-    assert r == {"narrative": "你走进洞穴。", "options": ["深入", "返回"]}
-    # 无选项标记 → 整段叙事 + 默认选项
+    assert r == {"narrative": "你走进洞穴。"}
+    # 无选项标记 → 整段叙事
     r = llm._parse_plain_narrative("只有叙事的一段描写。")
     assert r["narrative"] == "只有叙事的一段描写。"
-    assert r["options"] == llm.FALLBACK_OPTIONS
-    # 短横线选项，且不吞第一个
-    r = llm._parse_plain_narrative("叙事A\n- 选项甲\n- 选项乙")
-    assert r["options"] == ["选项甲", "选项乙"]
-    print("[OK] 叙事解析健壮性（围栏/废话/纯文本）")
+    print("[OK] 叙事解析健壮性（围栏/废话/裁剪选项）")
+
+
+def test_secret_key_storage():
+    import shutil
+    import tempfile
+
+    from game import secrets
+
+    orig_app_dir = config.APP_DIR
+    d = tempfile.mkdtemp(prefix="dnd_key_")
+    config.APP_DIR = d
+    try:
+        assert secrets.load_key() == "", "初始应无保存的 Key"
+        assert secrets.save_key("sk-test-123456") is True
+        assert secrets.load_key() == "sk-test-123456"
+        assert secrets.has_saved_key()
+        assert secrets.forget_key() is True
+        assert secrets.load_key() == ""
+        assert not secrets.has_saved_key()
+    finally:
+        config.APP_DIR = orig_app_dir
+        shutil.rmtree(d, ignore_errors=True)
+    print("[OK] API Key 本机保存/读取/删除")
 
 
 if __name__ == "__main__":
